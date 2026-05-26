@@ -90,6 +90,8 @@
 
     #root { display: flex; flex-direction: column; height: 100vh; }
 
+    @keyframes spin { to { transform: rotate(360deg); } }
+
     /* ── Header ── */
     .header {
       padding: 14px 20px;
@@ -1085,6 +1087,13 @@
       border-radius: 50%;
       flex-shrink: 0;
     }
+    .session-version {
+      font-weight: 400;
+      opacity: 0.75;
+      margin-left: 4px;
+      font-size: 10px;
+      letter-spacing: .2px;
+    }
     .session-banner.fg .session-dot { background: #22d3ee; box-shadow: 0 0 6px #22d3eeaa; }
     .session-banner.bg .session-dot { background: #f472b6; box-shadow: 0 0 6px #f472b6aa; }
     body.light .session-banner.fg .session-dot { background: #0891b2; box-shadow: none; }
@@ -1333,7 +1342,7 @@
 <div id="root"></div>
 
 <script type="text/babel">
-const { useState, useCallback, useMemo, useRef } = React;
+const { useState, useCallback, useMemo, useRef, memo } = React;
 
 // ── Context menu ──────────────────────────────────────────────────────────────
 function ContextMenu({ x, y, cls, onHideClass, onSoloClass, onClose }) {
@@ -1441,22 +1450,16 @@ function fmtDelta(ms) {
   return `+${(ms/1000).toFixed(1)}s`;
 }
 
-function LogEntry({ entry, globalWrap, searchRegex, bookmarked, onBookmark, delta, isCurrent, fontSize, lightMode, onContextMenu, onHideClass }) {
+const LogEntry = memo(function LogEntry({ entry, globalWrap, searchPattern, bookmarked, onBookmark, delta, isCurrent, fontSize, lightMode, onContextMenu, onHideClass }) {
   const [override, setOverride] = useState(null);
   const wrapped = override !== null ? override : globalWrap;
-  const [isMultiLine, setIsMultiLine] = useState(false);
-  const msgRef = useRef(null);
 
-  const { useEffect } = React;
-  useEffect(() => {
-    if (!msgRef.current) return;
-    const el = msgRef.current;
-    const prev = el.style.whiteSpace;
-    el.style.whiteSpace = 'nowrap';
-    const overflows = el.scrollWidth > el.parentElement.clientWidth;
-    el.style.whiteSpace = prev;
-    setIsMultiLine(overflows);
-  }, [entry.msg, searchRegex]);
+  const searchRegex = useMemo(() => {
+    if (!searchPattern) return null;
+    const [type, ...rest] = searchPattern.split(':');
+    const pat = rest.join(':');
+    try { return new RegExp(pat, 'gi'); } catch { return null; }
+  }, [searchPattern]);
 
   const toggleWrap = useCallback((ev) => {
     ev.stopPropagation();
@@ -1483,7 +1486,7 @@ function LogEntry({ entry, globalWrap, searchRegex, bookmarked, onBookmark, delt
   return (
     <div
       data-id={entry.id}
-      {...(entry.sessionMarker ? {'data-session-marker': entry.sessionMarker} : {})}
+      {...(entry.sessionMarker ? {'data-session-marker': entry.sessionMarker, ...(entry.sessionVersion ? {'data-session-version': entry.sessionVersion} : {})} : {})}
       className={`log-entry${wrapped ? ' entry-wrapped' : ''}${levelClass}${sessionClass}${bookmarked ? ' bookmarked' : ''}${isCurrent ? ' current-match' : ''}`}
       style={fontSize ? {fontSize} : undefined}
       onContextMenu={onContextMenu ? (e) => { e.preventDefault(); onContextMenu(e.clientX, e.clientY, entry.cls); } : undefined}
@@ -1517,10 +1520,10 @@ function LogEntry({ entry, globalWrap, searchRegex, bookmarked, onBookmark, delt
       )}
       {/* wrap */}
       <button
-        className={`wrap-btn${isMultiLine ? ' visible' : ''}${isOverridden && wrapped ? ' is-wrapped' : ''}`}
+        className={`wrap-btn visible${isOverridden && wrapped ? ' is-wrapped' : ''}`}
         onClick={toggleWrap}
         title={wrapped ? 'Collapse line' : 'Expand line'}
-        style={{ visibility: isMultiLine ? 'visible' : 'hidden' }}
+        style={{ visibility: entry.msg.length > 60 ? 'visible' : 'hidden' }}
       >
         {wrapped
           ? <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="21" y2="3"/><line x1="3" y1="21" x2="14" y2="10"/></svg>
@@ -1530,7 +1533,7 @@ function LogEntry({ entry, globalWrap, searchRegex, bookmarked, onBookmark, delt
       <span className="log-time">{fmtTime(entry.time)}</span>
       <span className={`log-delta${delta >= 1000 ? delta >= 5000 ? ' vslow' : ' slow' : ''}`}>{fmtDelta(delta)}</span>
       <span className="log-class" style={{color: clsColor(entry.cls, lightMode)}}>[{entry.cls}]</span>
-      <span ref={msgRef} className={`log-msg${wrapped ? ' msg-wrapped' : ' msg-nowrap'}`}>
+      <span className={`log-msg${wrapped ? ' msg-wrapped' : ' msg-nowrap'}`}>
         {highlight(entry.msg, searchRegex)}
         {isOverridden && wrapped && (
           <span className="wrap-pill" title="Individually expanded">expanded</span>
@@ -1538,7 +1541,7 @@ function LogEntry({ entry, globalWrap, searchRegex, bookmarked, onBookmark, delt
       </span>
     </div>
   );
-}
+});
 
 function highlight(text, regex) {
   if (!regex) return text;
@@ -1568,6 +1571,8 @@ function detectLevel(msg) {
 // ── foreground / background session detection ─────────────────────────────────
 const FG_RE = /\*+\s*APP IS IN THE FOREGROUND/i;
 const BG_RE = /\*+\s*APP IS IN THE BACKGROUND/i;
+// Matches version+build in patterns like: 9.0.9 (3262) | 9.0.9 - 3262 | v9.0.9 build 3262
+const VERSION_RE = /v?(\d+\.\d+[\.\d]*)\s*[-–()\s]*(?:build\s*)?(\d{3,})/i;
 
 function detectSession(cls, msg) {
   const combined = `[${cls}] ${msg}`;
@@ -1576,11 +1581,23 @@ function detectSession(cls, msg) {
   return null;
 }
 
+function detectVersion(msg) {
+  const m = msg.match(VERSION_RE);
+  if (!m) return null;
+  return `${m[1]} - ${m[2]}`;
+}
+
 // ── parser ───────────────────────────────────────────────────────────────────
 // Format A: Mon Apr 27 2026 at 05:24:30:109 PM :    [ClassName] Message
 const LOG_RE_A = /^(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{4}\s+at\s+\d{2}:\d{2}:\d{2}:\d{3}\s+[AP]M)\s*:\s*\[([^\]]+)\]\s*(.*)/;
 // Format B: 16:06:24.742  ClassName  L  Message  (Android logcat)
 const LOG_RE_B = /^(\d{2}:\d{2}:\d{2}\.\d{3})\s{1,10}(\S+)\s{1,10}([VDIWEF])\s{1,4}(.*)/;
+// Format C2: Thu May 21 2026 at 05:39:40.553 PM | ClassName | Message
+const LOG_RE_C = /^(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{4}\s+at\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+[AP]M)\s*\|\s*([^|]+?)\s*\|\s*(.*)/;
+// Format C1: Thu May 21 2026 at 05:39:40.553 PM | Message  (no class field; C is matched first so double-pipe goes to C)
+const LOG_RE_C1 = /^(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{4}\s+at\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+[AP]M)\s*\|\s*(.*)/;
+// Inline class bracket at start of message: [ClassName] rest
+const INLINE_CLS_RE = /^\[([^\]]+)\]\s*(.*)/;
 
 // map logcat single-letter level to our level names
 function logcatLevel(letter) {
@@ -1594,34 +1611,82 @@ function parseLogs(text) {
   const entries = [];
   let id = 0;
   let currentSession = null;
-  for (const raw of lines) {
+  let currentSessionVersion = null;
+
+  const pushEntry = (time, cls, msg) => {
+    const level = detectLevel(msg);
+    const sessionMarker = detectSession(cls, msg);
+    if (sessionMarker) {
+      currentSession = sessionMarker;
+      currentSessionVersion = detectVersion(msg) ?? currentSessionVersion;
+    }
+    entries.push({ id: id++, time, cls, msg, level, sessionMarker, session: currentSession, sessionVersion: currentSessionVersion, timeMs: parseLogTime(time) });
+  };
+
+  for (let li = 0; li < lines.length; li++) {
+    const raw = lines[li];
     const trimmed = raw.trim();
     if (!trimmed) continue;
-    let time, cls, msg, level;
+
+    let time, cls, msg;
     const mA = trimmed.match(LOG_RE_A);
     if (mA) {
-      time  = mA[1];
-      cls   = mA[2];
-      msg   = mA[3];
-      level = detectLevel(mA[3]);
+      time = mA[1]; cls = mA[2]; msg = mA[3];
     } else {
-      const mB = trimmed.match(LOG_RE_B);
-      if (!mB) continue;
-      time  = mB[1];          // HH:MM:SS.mmm
-      cls   = mB[2];          // tag / class name
-      msg   = mB[4];
-      level = logcatLevel(mB[3]) ?? detectLevel(mB[4]);
+      const mC = trimmed.match(LOG_RE_C);
+      if (mC) {
+        time = mC[1]; cls = mC[2]; msg = mC[3];
+      } else {
+        const mC1 = trimmed.match(LOG_RE_C1);
+        if (mC1) {
+          time = mC1[1];
+          const body = mC1[2];
+          // collect continuation lines (non-timestamp lines that follow)
+          const contLines = [body];
+          while (li + 1 < lines.length) {
+            const next = lines[li + 1];
+            const nextTrimmed = next.trim();
+            if (!nextTrimmed) { li++; continue; }
+            // stop if next line looks like a new log entry
+            if (LOG_RE_A.test(nextTrimmed) || LOG_RE_C.test(nextTrimmed) || LOG_RE_C1.test(nextTrimmed) || LOG_RE_B.test(nextTrimmed)) break;
+            contLines.push(next.trimEnd());
+            li++;
+          }
+          msg = contLines.join('\n');
+          // extract inline class if present: [ClassName] rest
+          const inlineM = contLines[0].match(INLINE_CLS_RE);
+          if (inlineM) {
+            cls = inlineM[1];
+            contLines[0] = inlineM[2];
+            msg = contLines.join('\n');
+          } else {
+            cls = 'General';
+          }
+          pushEntry(time, cls, msg);
+          continue;
+        } else {
+          const mB = trimmed.match(LOG_RE_B);
+          if (!mB) continue;
+          time = mB[1]; cls = mB[2]; msg = mB[4];
+          const level = logcatLevel(mB[3]) ?? detectLevel(mB[4]);
+          const sessionMarker = detectSession(cls, msg);
+          if (sessionMarker) {
+            currentSession = sessionMarker;
+            currentSessionVersion = detectVersion(msg) ?? currentSessionVersion;
+          }
+          entries.push({ id: id++, time, cls, msg, level, sessionMarker, session: currentSession, sessionVersion: currentSessionVersion, timeMs: parseLogTime(time) });
+          continue;
+        }
+      }
     }
-    const sessionMarker = detectSession(cls, msg);
-    if (sessionMarker) currentSession = sessionMarker;
-    entries.push({ id: id++, time, cls, msg, level, sessionMarker, session: currentSession });
+    pushEntry(time, cls, msg);
   }
   return entries;
 }
 
 function parseLogTime(timeStr) {
-  // Format A: "... at HH:MM:SS:mmm AM/PM"
-  const mA = timeStr.match(/at\s+(\d{2}):(\d{2}):(\d{2}):(\d{3})\s+(AM|PM)/i);
+  // Format A / C: "... at HH:MM:SS:mmm AM/PM" or "... at HH:MM:SS.mmm AM/PM"
+  const mA = timeStr.match(/at\s+(\d{2}):(\d{2}):(\d{2})[.:](\d{3})\s+(AM|PM)/i);
   if (mA) {
     let h = parseInt(mA[1]), min = parseInt(mA[2]), sec = parseInt(mA[3]), ms = parseInt(mA[4]);
     const ampm = mA[5].toUpperCase();
@@ -1639,17 +1704,31 @@ function parseLogTime(timeStr) {
 
 function parseInputTime(str) {
   if (!str.trim()) return null;
-  const m = str.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2})(?:[.:](\d{3}))?)?$/);
-  if (!m) return null;
-  const h = parseInt(m[1]), min = parseInt(m[2]),
-        sec = m[3] ? parseInt(m[3]) : 0,
-        ms  = m[4] ? parseInt(m[4]) : 0;
+  const s = str.trim();
+  // 12-hour with AM/PM: "5:24:30 PM" or "05:24:30:109 PM" (matches log Format A style)
+  const m12 = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2})(?:[.:](\d{3}))?)?\s*(AM|PM)$/i);
+  if (m12) {
+    let h = parseInt(m12[1]);
+    const min = parseInt(m12[2]),
+          sec = m12[3] ? parseInt(m12[3]) : 0,
+          ms  = m12[4] ? parseInt(m12[4]) : 0,
+          ampm = m12[5].toUpperCase();
+    if (ampm === 'PM' && h !== 12) h += 12;
+    if (ampm === 'AM' && h === 12) h = 0;
+    return h * 3600000 + min * 60000 + sec * 1000 + ms;
+  }
+  // 24-hour: "17:24:30" or "17:24:30.109" (matches log Format B style)
+  const m24 = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2})(?:[.:](\d{3}))?)?$/);
+  if (!m24) return null;
+  const h = parseInt(m24[1]), min = parseInt(m24[2]),
+        sec = m24[3] ? parseInt(m24[3]) : 0,
+        ms  = m24[4] ? parseInt(m24[4]) : 0;
   return h * 3600000 + min * 60000 + sec * 1000 + ms;
 }
 
 function fmtTime(timeStr) {
-  // Format A
-  const mA = timeStr.match(/at\s+(\d{2}:\d{2}:\d{2}:\d{3}\s+[AP]M)/i);
+  // Format A / C
+  const mA = timeStr.match(/at\s+(\d{2}:\d{2}:\d{2}[.:]\d{3}\s+[AP]M)/i);
   if (mA) return mA[1];
   // Format B — already short, return as-is
   return timeStr;
@@ -1859,7 +1938,7 @@ function Timeline({ logs, visibleLogs, onJump }) {
 }
 
 // ── Class group ───────────────────────────────────────────────────────────────
-function ClassGroup({ entries, globalWrap, searchRegex, bookmarks, onBookmark, deltas, startDeltaIdx, collapseAll, currentMatchLogId, fontSize, lightMode, onContextMenu, onHideClass }) {
+const ClassGroup = memo(function ClassGroup({ entries, globalWrap, searchPattern, bookmarks, onBookmark, deltas, startDeltaIdx, collapseAll, currentMatchLogId, fontSize, lightMode, onContextMenu, onHideClass }) {
   const { useEffect } = React;
   const [open, setOpen] = useState(entries.length <= 3);
   useEffect(() => {
@@ -1867,7 +1946,7 @@ function ClassGroup({ entries, globalWrap, searchRegex, bookmarks, onBookmark, d
     setOpen(!collapseAll);
   }, [collapseAll]);
   if (entries.length === 1) {
-    return <LogEntry key={`${entries[0].id}-${globalWrap}`} entry={entries[0]} globalWrap={globalWrap} searchRegex={searchRegex} bookmarked={bookmarks.has(entries[0].id)} onBookmark={onBookmark} delta={deltas[startDeltaIdx]} isCurrent={currentMatchLogId === entries[0].id} fontSize={fontSize} lightMode={lightMode} onContextMenu={onContextMenu} onHideClass={onHideClass} />;
+    return <LogEntry key={`${entries[0].id}-${globalWrap}`} entry={entries[0]} globalWrap={globalWrap} searchPattern={searchPattern} bookmarked={bookmarks.has(entries[0].id)} onBookmark={onBookmark} delta={deltas[startDeltaIdx]} isCurrent={currentMatchLogId === entries[0].id} fontSize={fontSize} lightMode={lightMode} onContextMenu={onContextMenu} onHideClass={onHideClass} />;
   }
   return (
     <div>
@@ -1880,16 +1959,16 @@ function ClassGroup({ entries, globalWrap, searchRegex, bookmarks, onBookmark, d
       {open && (
         <div className="group-entries">
           {entries.map((e, i) => (
-            <LogEntry key={`${e.id}-${globalWrap}`} entry={e} globalWrap={globalWrap} searchRegex={searchRegex} bookmarked={bookmarks.has(e.id)} onBookmark={onBookmark} delta={deltas[startDeltaIdx + i]} isCurrent={currentMatchLogId === e.id} fontSize={fontSize} lightMode={lightMode} onContextMenu={onContextMenu} onHideClass={onHideClass} />
+            <LogEntry key={`${e.id}-${globalWrap}`} entry={e} globalWrap={globalWrap} searchPattern={searchPattern} bookmarked={bookmarks.has(e.id)} onBookmark={onBookmark} delta={deltas[startDeltaIdx + i]} isCurrent={currentMatchLogId === e.id} fontSize={fontSize} lightMode={lightMode} onContextMenu={onContextMenu} onHideClass={onHideClass} />
           ))}
         </div>
       )}
     </div>
   );
-}
+});
 
 // ── Dedup group ───────────────────────────────────────────────────────────────
-function DedupGroup({ entries, globalWrap, searchRegex, bookmarks, onBookmark, deltas, startDeltaIdx, collapseAll, currentMatchLogId, fontSize, lightMode, onContextMenu, onHideClass }) {
+const DedupGroup = memo(function DedupGroup({ entries, globalWrap, searchPattern, bookmarks, onBookmark, deltas, startDeltaIdx, collapseAll, currentMatchLogId, fontSize, lightMode, onContextMenu, onHideClass }) {
   const { useEffect } = React;
   const [open, setOpen] = useState(false);
   useEffect(() => {
@@ -1898,8 +1977,15 @@ function DedupGroup({ entries, globalWrap, searchRegex, bookmarks, onBookmark, d
   }, [collapseAll]);
   const first = entries[0];
 
+  const firstMsgHighlighted = useMemo(() => {
+    if (!searchPattern) return first.msg;
+    const [type, ...rest] = searchPattern.split(':');
+    const pat = rest.join(':');
+    try { return highlight(first.msg, new RegExp(pat, 'gi')); } catch { return first.msg; }
+  }, [first.msg, searchPattern]);
+
   if (entries.length === 1) {
-    return <LogEntry entry={first} globalWrap={globalWrap} searchRegex={searchRegex} bookmarked={bookmarks.has(first.id)} onBookmark={onBookmark} delta={deltas[startDeltaIdx]} isCurrent={currentMatchLogId === first.id} fontSize={fontSize} lightMode={lightMode} onContextMenu={onContextMenu} onHideClass={onHideClass} />;
+    return <LogEntry entry={first} globalWrap={globalWrap} searchPattern={searchPattern} bookmarked={bookmarks.has(first.id)} onBookmark={onBookmark} delta={deltas[startDeltaIdx]} isCurrent={currentMatchLogId === first.id} fontSize={fontSize} lightMode={lightMode} onContextMenu={onContextMenu} onHideClass={onHideClass} />;
   }
 
   return (
@@ -1915,7 +2001,7 @@ function DedupGroup({ entries, globalWrap, searchRegex, bookmarks, onBookmark, d
         <span className="log-time">{fmtTime(first.time)}</span>
         <span className="log-delta" />
         <span className="log-class" style={{color: clsColor(first.cls, lightMode)}}>[{first.cls}]</span>
-        <span className="log-msg msg-nowrap" style={{flex:1}}>{highlight(first.msg, searchRegex)}</span>
+        <span className="log-msg msg-nowrap" style={{flex:1}}>{firstMsgHighlighted}</span>
         <button className="dedup-badge" onClick={() => setOpen(v => !v)} title={open ? 'Collapse duplicates' : 'Expand duplicates'}>
           {open
             ? <><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="5" y1="12" x2="19" y2="12"/></svg> collapse</>
@@ -1927,13 +2013,13 @@ function DedupGroup({ entries, globalWrap, searchRegex, bookmarks, onBookmark, d
       {open && (
         <div className="dedup-expanded">
           {entries.map((e, i) => (
-            <LogEntry key={`${e.id}-${globalWrap}`} entry={e} globalWrap={globalWrap} searchRegex={searchRegex} bookmarked={bookmarks.has(e.id)} onBookmark={onBookmark} delta={deltas[startDeltaIdx + i]} isCurrent={currentMatchLogId === e.id} fontSize={fontSize} lightMode={lightMode} onContextMenu={onContextMenu} onHideClass={onHideClass} />
+            <LogEntry key={`${e.id}-${globalWrap}`} entry={e} globalWrap={globalWrap} searchPattern={searchPattern} bookmarked={bookmarks.has(e.id)} onBookmark={onBookmark} delta={deltas[startDeltaIdx + i]} isCurrent={currentMatchLogId === e.id} fontSize={fontSize} lightMode={lightMode} onContextMenu={onContextMenu} onHideClass={onHideClass} />
           ))}
         </div>
       )}
     </div>
   );
-}
+});
 
 // ── dedup helper: collapse consecutive identical cls+msg runs ─────────────────
 function buildDedupGroups(entries) {
@@ -1954,8 +2040,11 @@ const LS_FILE_KEY    = 'logfilter_file_v1';
 const LS_FILTER_KEY  = 'logfilter_filters_v1';
 const LS_PRESETS_KEY = 'logfilter_presets_v1';
 
+const LS_FILE_SIZE_LIMIT = 500 * 1024; // skip localStorage for files > 500 KB
+
 function saveFile(fileName, rawText) {
-  try { localStorage.setItem(LS_FILE_KEY, JSON.stringify({ fileName, rawText })); } catch (_) {}
+  if (rawText.length > LS_FILE_SIZE_LIMIT) return; // too large — skip to avoid blocking
+  try { setTimeout(() => { try { localStorage.setItem(LS_FILE_KEY, JSON.stringify({ fileName, rawText })); } catch (_) {} }, 0); } catch (_) {}
 }
 
 function saveFilters(filters) {
@@ -1996,6 +2085,17 @@ function pushSearchHistory(term, current) {
   return deduped;
 }
 
+// ── Sidebar class list item ───────────────────────────────────────────────────
+const ClassListItem = memo(function ClassListItem({ cls, count, checked, onToggle, lightMode }) {
+  return (
+    <label className="class-item">
+      <input type="checkbox" checked={checked} onChange={onToggle} />
+      <span className="class-label" title={cls} style={{color: clsColor(cls, lightMode)}}>{cls}</span>
+      <span className="class-count">{count}</span>
+    </label>
+  );
+});
+
 // ── App ──────────────────────────────────────────────────────────────────────
 function App() {
   const { useEffect } = React;
@@ -2003,11 +2103,14 @@ function App() {
   const searchInputRef = useRef(null);
   const navMatchRef = useRef(null);
   const [fileName, setFileName] = useState('');
+  const [loading, setLoading] = useState(false);
   const [logs, setLogs] = useState([]);
   const [checked, setChecked] = useState({});
   const [classSearch, setClassSearch] = useState('');
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo]   = useState('');
+  const [timeFromInput, setTimeFromInput] = useState('');
+  const [timeToInput, setTimeToInput]     = useState('');
   const [stringSearch, setStringSearch] = useState('');
   const [regexMode, setRegexMode] = useState(false);
   const [wrapLines, setWrapLines] = useState(true);
@@ -2033,6 +2136,16 @@ function App() {
   const [showPasteModal, setShowPasteModal] = useState(false);
   const [pasteText, setPasteText] = useState('');
   const pasteTextareaRef = useRef(null);
+
+  // debounce time inputs — only update the filter state 300ms after typing stops
+  useEffect(() => {
+    const id = setTimeout(() => setTimeFrom(timeFromInput), 300);
+    return () => clearTimeout(id);
+  }, [timeFromInput]);
+  useEffect(() => {
+    const id = setTimeout(() => setTimeTo(timeToInput), 300);
+    return () => clearTimeout(id);
+  }, [timeToInput]);
 
   // apply theme to body
   useEffect(() => {
@@ -2123,8 +2236,8 @@ function App() {
         merged[cls] = cls in savedFilters.checked ? savedFilters.checked[cls] : true;
       }
       setChecked(merged);
-      setTimeFrom(savedFilters.timeFrom ?? '');
-      setTimeTo(savedFilters.timeTo ?? '');
+      setTimeFrom(savedFilters.timeFrom ?? ''); setTimeFromInput(savedFilters.timeFrom ?? '');
+      setTimeTo(savedFilters.timeTo ?? '');     setTimeToInput(savedFilters.timeTo ?? '');
       setStringSearch(savedFilters.stringSearch ?? '');
       setRegexMode(savedFilters.regexMode ?? false);
       setWrapLines(savedFilters.wrapLines ?? true);
@@ -2143,19 +2256,27 @@ function App() {
   }, [checked, timeFrom, timeTo, stringSearch, regexMode, wrapLines, classSearch, logs.length]);
 
   const loadEntries = useCallback((rawText, name) => {
-    const entries = parseLogs(rawText);
-    setLogs(entries);
+    // Reset UI immediately so the interface stays responsive
+    setLoading(true);
+    setLogs([]);
     setFileName(name);
-    const cls = {};
-    for (const e of entries) cls[e.cls] = true;
-    setChecked(cls);
-    setTimeFrom(''); setTimeTo('');
+    setChecked({});
+    setTimeFrom(''); setTimeTo(''); setTimeFromInput(''); setTimeToInput('');
     setClassSearch(''); setStringSearch('');
     setRegexMode(false); setWrapLines(true);
     setBookmarks(new Set()); setShowBookmarks(false); setLevelFilter(null); setGroupByClass(false); setDedupLogs(true);
     clsColorCache.clear(); clsColorIdx = 0;
-    saveFile(name, rawText);
     try { localStorage.removeItem(LS_FILTER_KEY); } catch (_) {}
+    // Defer the heavy parse so React can paint the reset state first
+    setTimeout(() => {
+      const entries = parseLogs(rawText);
+      const cls = {};
+      for (const e of entries) cls[e.cls] = true;
+      setLogs(entries);
+      setChecked(cls);
+      setLoading(false);
+      saveFile(name, rawText);
+    }, 0);
   }, []);
 
   const handleFile = useCallback((e) => {
@@ -2169,8 +2290,8 @@ function App() {
 
   const handleClear = useCallback(() => {
     clearStorage();
-    setLogs([]); setFileName(''); setChecked({});
-    setTimeFrom(''); setTimeTo('');
+    setLogs([]); setFileName(''); setChecked({}); setLoading(false);
+    setTimeFrom(''); setTimeTo(''); setTimeFromInput(''); setTimeToInput('');
     setClassSearch(''); setStringSearch('');
     setBookmarks(new Set()); setShowBookmarks(false); setLevelFilter(null);
   }, []);
@@ -2197,7 +2318,7 @@ function App() {
 
   const toggleLevelFilter = (level) => setLevelFilter(prev => prev === level ? null : level);
 
-  const toggleClass = (cls) => setChecked(prev => ({ ...prev, [cls]: !prev[cls] }));
+  const toggleClass = useCallback((cls) => setChecked(prev => ({ ...prev, [cls]: !prev[cls] })), []);
   const selectAll   = () => setChecked(prev => Object.fromEntries(Object.keys(prev).map(k => [k, true])));
   const deselectAll = () => setChecked(prev => Object.fromEntries(Object.keys(prev).map(k => [k, false])));
 
@@ -2260,8 +2381,8 @@ function App() {
     const merged = {};
     for (const cls of Object.keys(checked)) merged[cls] = cls in preset.checked ? preset.checked[cls] : true;
     setChecked(merged);
-    setTimeFrom(preset.timeFrom ?? '');
-    setTimeTo(preset.timeTo ?? '');
+    setTimeFrom(preset.timeFrom ?? ''); setTimeFromInput(preset.timeFrom ?? '');
+    setTimeTo(preset.timeTo ?? '');     setTimeToInput(preset.timeTo ?? '');
     setStringSearch(preset.stringSearch ?? '');
     setRegexMode(preset.regexMode ?? false);
     setLevelFilter(preset.levelFilter ?? null);
@@ -2277,26 +2398,32 @@ function App() {
   const fromMs = useMemo(() => parseInputTime(timeFrom), [timeFrom]);
   const toMs   = useMemo(() => parseInputTime(timeTo),   [timeTo]);
 
-  // build search regex (or null)
-  const { searchRegex, regexError } = useMemo(() => {
+  // build search regex (or null) — use a ref to keep the same object reference when pattern hasn't changed
+  const searchRegexRef = useRef(null);
+  const searchPatternRef = useRef('');
+  const { searchRegex, regexError, searchPattern } = useMemo(() => {
     const raw = stringSearch.trim();
-    if (!raw) return { searchRegex: null, regexError: null };
-    if (!regexMode) {
-      const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      return { searchRegex: new RegExp(escaped, 'gi'), regexError: null };
+    if (!raw) { searchRegexRef.current = null; searchPatternRef.current = ''; return { searchRegex: null, regexError: null, searchPattern: '' }; }
+    const pattern = regexMode ? raw : raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const key = `${regexMode ? 'r' : 'l'}:${pattern}`;
+    if (key !== searchPatternRef.current) {
+      try {
+        searchRegexRef.current = new RegExp(pattern, 'gi');
+        searchPatternRef.current = key;
+        return { searchRegex: searchRegexRef.current, regexError: null, searchPattern: key };
+      } catch (err) {
+        searchRegexRef.current = null; searchPatternRef.current = '';
+        return { searchRegex: null, regexError: err.message, searchPattern: '' };
+      }
     }
-    try {
-      return { searchRegex: new RegExp(raw, 'gi'), regexError: null };
-    } catch (err) {
-      return { searchRegex: null, regexError: err.message };
-    }
+    return { searchRegex: searchRegexRef.current, regexError: null, searchPattern: key };
   }, [stringSearch, regexMode]);
 
   const visibleLogs = useMemo(() => {
     return logs.filter(e => {
       if (!checked[e.cls]) return false;
       if (fromMs !== null || toMs !== null) {
-        const t = parseLogTime(e.time);
+        const t = e.timeMs;
         if (t !== null) {
           if (fromMs !== null && t < fromMs) return false;
           if (toMs   !== null && t > toMs)   return false;
@@ -2347,6 +2474,7 @@ function App() {
 
   const logPaneRef = useRef(null);
   const [currentSession, setCurrentSession] = useState(null);
+  const [currentSessionVersion, setCurrentSessionVersion] = useState(null);
 
   // track which session is in view by watching scroll
   useEffect(() => {
@@ -2357,12 +2485,16 @@ function App() {
       // walk all session-marker rows and find the last one above or at the viewport top
       const markers = pane.querySelectorAll('[data-session-marker]');
       let active = null;
+      let activeVersion = null;
       for (const el of markers) {
         const rect = el.getBoundingClientRect();
-        if (rect.top <= paneTop + 4) active = el.dataset.sessionMarker;
-        else break;
+        if (rect.top <= paneTop + 4) {
+          active = el.dataset.sessionMarker;
+          activeVersion = el.dataset.sessionVersion || activeVersion;
+        } else break;
       }
       setCurrentSession(active || null);
+      setCurrentSessionVersion(activeVersion || null);
     };
     pane.addEventListener('scroll', update, { passive: true });
     update();
@@ -2440,7 +2572,7 @@ function App() {
                 ref={pasteTextareaRef}
                 value={pasteText}
                 onChange={e => setPasteText(e.target.value)}
-                placeholder={"Paste your log text here…\n\nExpected format:\nMon Apr 27 2026 at 05:24:30:109 PM :    [ClassName] Message"}
+                placeholder={"Paste your log text here…\n\nSupported formats:\nThu May 21 2026 at 05:39:40.553 PM | ClassName | Message\nThu May 21 2026 at 05:39:40.553 PM | Message (with optional multi-line body)\nMon Apr 27 2026 at 05:24:30:109 PM :    [ClassName] Message"}
                 onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); loadFromPaste(); } if (e.key === 'Escape') { setShowPasteModal(false); setPasteText(''); } }}
               />
             </div>
@@ -2466,7 +2598,7 @@ function App() {
       <div className="header">
         <h1>Log Filter</h1>
         <button className="upload-btn" onClick={() => fileInputRef.current.click()}>
-          Upload .txt
+          Upload log
         </button>
         <input ref={fileInputRef} type="file" accept=".txt,.log" style={{display:'none'}} onChange={handleFile} />
         <button className="upload-btn" style={{background:'transparent', border:'1px solid var(--accent)', color:'var(--accent-light)'}} onClick={openPasteModal} title="Paste log text (⌘V)">
@@ -2709,13 +2841,16 @@ function App() {
           )}
 
           <div className="class-list">
-            {filteredClasses.map(([cls, count]) => (
-              <label key={cls} className="class-item">
-                <input type="checkbox" checked={!!checked[cls]} onChange={() => toggleClass(cls)} />
-                <span className="class-label" title={cls} style={{color: clsColor(cls, lightMode)}}>{cls}</span>
-                <span className="class-count">{count}</span>
-              </label>
-            ))}
+            {useMemo(() => filteredClasses.map(([cls, count]) => (
+              <ClassListItem
+                key={cls}
+                cls={cls}
+                count={count}
+                checked={!!checked[cls]}
+                onToggle={() => toggleClass(cls)}
+                lightMode={lightMode}
+              />
+            )), [filteredClasses, checked, lightMode, toggleClass])}
           </div>
 
           {/* Time filter */}
@@ -2724,15 +2859,15 @@ function App() {
             <div className="time-inputs">
               <div className="time-row">
                 <span>From</span>
-                <input value={timeFrom} onChange={e => setTimeFrom(e.target.value)} placeholder="05:24:30" />
+                <input value={timeFromInput} onChange={e => setTimeFromInput(e.target.value)} placeholder="5:24:30 PM" />
               </div>
               <div className="time-row">
                 <span>To</span>
-                <input value={timeTo} onChange={e => setTimeTo(e.target.value)} placeholder="05:25:00" />
+                <input value={timeToInput} onChange={e => setTimeToInput(e.target.value)} placeholder="5:25:00 PM" />
               </div>
             </div>
-            {(timeFrom || timeTo) && (
-              <button className="time-clear" onClick={() => { setTimeFrom(''); setTimeTo(''); }}>
+            {(timeFromInput || timeToInput) && (
+              <button className="time-clear" onClick={() => { setTimeFromInput(''); setTimeToInput(''); setTimeFrom(''); setTimeTo(''); }}>
                 Clear time filter
               </button>
             )}
@@ -2754,8 +2889,8 @@ function App() {
           {logs.length > 0 && (
             <div className={`session-banner${currentSession === 'foreground' ? ' fg' : currentSession === 'background' ? ' bg' : ' none'}`}>
               <div className="session-dot" />
-              {currentSession === 'foreground' && '▶ App in Foreground'}
-              {currentSession === 'background' && '⏸ App in Background'}
+              {currentSession === 'foreground' && <>▶ App in Foreground{currentSessionVersion && <span className="session-version">({currentSessionVersion})</span>}</>}
+              {currentSession === 'background' && <>⏸ App in Background{currentSessionVersion && <span className="session-version">({currentSessionVersion})</span>}</>}
               {!currentSession && 'No session detected yet'}
             </div>
           )}
@@ -2780,7 +2915,14 @@ function App() {
             />
           )}
           <div className="log-pane" ref={logPaneRef} style={{fontSize, flex:1}}>
-          {logs.length === 0 ? (
+          {loading ? (
+            <div className="empty-state">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#4f46e5" strokeWidth="2" style={{animation:'spin 1s linear infinite'}}>
+                <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+              </svg>
+              <p style={{marginTop:12}}>Parsing logs…</p>
+            </div>
+          ) : logs.length === 0 ? (
             <div className="empty-state">
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#4f46e5" strokeWidth="1.5">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -2791,7 +2933,7 @@ function App() {
               </svg>
               <p>Upload a log file or paste log text</p>
               <div className="empty-state-actions">
-                <button className="upload-btn" onClick={() => fileInputRef.current.click()}>Upload .txt</button>
+                <button className="upload-btn" onClick={() => fileInputRef.current.click()}>Upload log</button>
                 <span className="empty-state-divider">or</span>
                 <button className="upload-btn" style={{background:'transparent',border:'1px solid var(--accent)',color:'var(--accent-light)'}} onClick={openPasteModal}>Paste logs</button>
                 <span className="empty-state-divider">or press</span>
@@ -2807,7 +2949,7 @@ function App() {
                 key={`g-${gi}-${wrapLines}`}
                 entries={g.entries}
                 globalWrap={wrapLines}
-                searchRegex={searchRegex}
+                searchPattern={searchPattern}
                 bookmarks={bookmarks}
                 onBookmark={toggleBookmark}
                 deltas={deltas}
@@ -2826,7 +2968,7 @@ function App() {
                 key={`d-${gi}-${wrapLines}`}
                 entries={g.entries}
                 globalWrap={wrapLines}
-                searchRegex={searchRegex}
+                searchPattern={searchPattern}
                 bookmarks={bookmarks}
                 onBookmark={toggleBookmark}
                 deltas={deltas}
@@ -2848,7 +2990,7 @@ function App() {
                   key={`${e.id}-${wrapLines}`}
                   entry={e}
                   globalWrap={wrapLines}
-                  searchRegex={searchRegex}
+                  searchPattern={searchPattern}
                   bookmarked={bookmarks.has(e.id)}
                   onBookmark={toggleBookmark}
                   delta={deltas[i]}
